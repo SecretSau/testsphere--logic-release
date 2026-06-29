@@ -1,7 +1,7 @@
 {
   "version": "1.1.1",
   "sha256": "REPLACE_WITH_ACTUAL_SHA256_OF_LOGIC_PY",
-  "download_url": "https://raw.githubusercontent.com/SecretSau/TestSphere_V1_releases_apk_QA/main/logic.py",
+  "download_url": "https://raw.githubusercontent.com/SecretSau/testsphere--logic-release/main/logic.py",
   "release_date": "2025-01-15",
   "min_app_version": "1.0.0",
   "changelog": "Initial manifest-based distribution"
