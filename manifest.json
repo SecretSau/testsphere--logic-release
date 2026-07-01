@@ -1,8 +1,16 @@
 {
   "version": "1.1.2",
-  "sha256": "8e4d48486ac87e49fc7873ee32564491fd6b4687a1dc6b3e487c4bb76264f6c8",
-  "download_url": "https://raw.githubusercontent.com/SecretSau/testsphere--logic-release/main/logic.py",
-  "release_date": "2026-06-30",
+  "release_date": "2025-01-15",
   "min_app_version": "1.0.0",
-  "changelog": "Initial manifest-based distribution"
+  "changelog": "Fixed dropdown selection, added rating/upload/icon commands, smarter vision",
+  "files": {
+    "logic": {
+      "sha256": "8e4d48486ac87e49fc7873ee32564491fd6b4687a1dc6b3e487c4bb76264f6c8",
+      "download_url": "https://raw.githubusercontent.com/SecretSau/testsphere--logic-release/main/logic.py"
+    },
+    "vision": {
+      "sha256": "3146ea9f3df62692774da0ab8cd58da9367e036b5e3d9a9749ce16e9c80e1785",
+      "download_url": "https://raw.githubusercontent.com/SecretSau/testsphere--vision-release/main/vision.py"
+    }
+  }
 }
