@@ -816,10 +816,16 @@ class ElementFinder:
 
     def select_custom_dropdown(self, identifier: str, option_text: str) -> bool:
         """
-        Handle custom (non-native) dropdowns:
-        click trigger → wait for options → click matching option.
+        Handle ALL dropdown types:
+        - Native <select>
+        - Custom div/ul dropdowns (React Select, Vue Select, etc.)
+        - Combobox inputs
+        - Options appended to <body> (portal dropdowns)
         """
-        # Try native <select> first
+        ident_l  = identifier.lower().strip()
+        option_l = option_text.lower().strip()
+
+        # ── Step 1: Native <select> ───────────────────────────────────────────
         sel_el = self.find_select(identifier)
         if sel_el:
             try:
@@ -833,83 +839,204 @@ class ElementFinder:
                     return True
                 except Exception:
                     pass
+                # Partial text match on native select
+                try:
+                    sel_obj = Select(sel_el)
+                    for opt in sel_obj.options:
+                        if option_l in opt.text.lower():
+                            sel_obj.select_by_visible_text(opt.text)
+                            print(f"[Dropdown] Native partial: {opt.text}")
+                            return True
+                except Exception:
+                    pass
 
-        # Find and click the trigger (div/button acting as dropdown)
-        trigger_xpaths = [
-            f"//*[@role='combobox' and contains(translate(normalize-space(.),"
-            f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
-            f"'{identifier.lower()}')]",
-            f"//*[@role='listbox']//ancestor::*[@aria-haspopup]",
-            f"//label[contains(translate(normalize-space(.),"
-            f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
-            f"'{identifier.lower()}')]"
-            f"/following-sibling::*[@role='combobox' or @role='button' or "
-            f"contains(@class,'select') or contains(@class,'dropdown')][1]",
-            f"//*[contains(@class,'select') or contains(@class,'dropdown')]"
-            f"[contains(translate(normalize-space(.),"
-            f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
-            f"'{identifier.lower()}')]",
-        ]
+        # ── Step 2: Find trigger ──────────────────────────────────────────────
+        def _find_trigger():
+            # 1. label → associated element
+            label_xpaths = [
+                f"//label[contains(translate(normalize-space(.),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                f"'{ident_l}')]",
+                f"//*[contains(@class,'label') and contains(translate(normalize-space(.),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                f"'{ident_l}')]",
+            ]
+            for lbl_xp in label_xpaths:
+                try:
+                    for lbl in self.driver.find_elements(By.XPATH, lbl_xp):
+                        if not lbl.is_displayed():
+                            continue
+                        for_id = lbl.get_attribute("for")
+                        if for_id:
+                            try:
+                                el = self.driver.find_element(By.ID, for_id)
+                                if el.is_displayed():
+                                    return el
+                            except Exception:
+                                pass
+                        sibling_xpaths = [
+                            "./following-sibling::*[@role='combobox'][1]",
+                            "./following-sibling::*[contains(@class,'select')][1]",
+                            "./following-sibling::*[contains(@class,'dropdown')][1]",
+                            "./following-sibling::div[1]",
+                            "./parent::*//*[@role='combobox'][1]",
+                            "./parent::*//*[contains(@class,'select')][1]",
+                            "./parent::div/following-sibling::div//*[@role='combobox'][1]",
+                        ]
+                        for sxp in sibling_xpaths:
+                            try:
+                                el = lbl.find_element(By.XPATH, sxp)
+                                if el.is_displayed():
+                                    return el
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
 
-        trigger = None
-        for xp in trigger_xpaths:
+            # 2. role=combobox with matching attributes
+            for attr in ("aria-label", "placeholder", "name", "id"):
+                try:
+                    xp = (
+                        f"//*[@role='combobox'][contains("
+                        f"translate(@{attr},'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                        f"'abcdefghijklmnopqrstuvwxyz'),'{ident_l}')]"
+                    )
+                    for el in self.driver.find_elements(By.XPATH, xp):
+                        if el.is_displayed():
+                            return el
+                except Exception:
+                    pass
+
+            # 3. Only one combobox on page — use it
             try:
-                els = self.driver.find_elements(By.XPATH, xp)
-                for el in els:
-                    if el.is_displayed():
-                        trigger = el
-                        break
+                combos = [
+                    el for el in self.driver.find_elements(By.XPATH, "//*[@role='combobox']")
+                    if el.is_displayed()
+                ]
+                if len(combos) == 1:
+                    return combos[0]
             except Exception:
                 pass
-            if trigger:
-                break
 
-        # Scroll to find trigger
+            # 4. Class-based triggers
+            class_xpaths = [
+                f"//*[contains(@class,'select') or contains(@class,'dropdown')]"
+                f"[contains(translate(normalize-space(.),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'{ident_l}')]",
+                "//*[contains(@class,'select__control') or "
+                "contains(@class,'dropdown-toggle') or "
+                "contains(@class,'multiselect__select')]",
+            ]
+            for xp in class_xpaths:
+                try:
+                    for el in self.driver.find_elements(By.XPATH, xp):
+                        if el.is_displayed():
+                            return el
+                except Exception:
+                    pass
+            return None
+
+        trigger = _find_trigger()
         if not trigger:
             self._scroll_page_to(0)
             for y in self._scroll_positions():
                 self._scroll_page_to(y)
-                for xp in trigger_xpaths:
-                    try:
-                        els = self.driver.find_elements(By.XPATH, xp)
-                        for el in els:
-                            if el.is_displayed():
-                                trigger = el
-                                break
-                    except Exception:
-                        pass
+                trigger = _find_trigger()
                 if trigger:
                     break
 
         if not trigger:
-            print(f"[Dropdown] No trigger found for: {identifier}")
+            print(f"[Dropdown] No trigger found for: '{identifier}'")
             return False
 
+        # ── Step 3: Click trigger ─────────────────────────────────────────────
+        self.scroll_to(trigger)
         self.safe_click(trigger)
-        time.sleep(0.6)
+        time.sleep(1.0)
 
-        # Find and click the option
-        option_xpaths = [
-            f"//*[@role='option' and contains(normalize-space(.),'{option_text}')]",
-            f"//li[contains(normalize-space(.),'{option_text}')]",
-            f"//*[contains(@class,'option') and contains(normalize-space(.),'{option_text}')]",
-            f"//*[contains(@class,'item') and normalize-space(.)='{option_text}']",
-            f"//*[normalize-space(.)='{option_text}']",
-        ]
-        for xp in option_xpaths:
-            try:
-                opts = self.driver.find_elements(By.XPATH, xp)
-                for opt in opts:
-                    if opt.is_displayed():
-                        self.safe_click(opt)
-                        print(f"[Dropdown] Selected: {option_text}")
-                        return True
-            except Exception:
-                pass
+        # ── Step 4: Find option ───────────────────────────────────────────────
+        def _find_option():
+            option_xpaths = [
+                f"//*[@role='option' and normalize-space(.)='{option_text}']",
+                f"//*[@role='option' and contains(normalize-space(.),'{option_text}')]",
+                f"//*[@role='option' and contains(translate(normalize-space(.),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'{option_l}')]",
+                f"//li[normalize-space(.)='{option_text}']",
+                f"//li[contains(normalize-space(.),'{option_text}')]",
+                f"//li[contains(translate(normalize-space(.),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'{option_l}')]",
+                f"//*[contains(@class,'option') and contains(translate(normalize-space(.),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'{option_l}')]",
+                f"//*[contains(@class,'item') and contains(translate(normalize-space(.),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'{option_l}')]",
+                f"//*[contains(@class,'select__option') and contains(translate(normalize-space(.),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'{option_l}')]",
+                f"//*[contains(@class,'menu-item') and contains(translate(normalize-space(.),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'{option_l}')]",
+                f"//*[contains(@class,'multiselect__element') and contains("
+                f"translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                f"'abcdefghijklmnopqrstuvwxyz'),'{option_l}')]",
+            ]
+            for xp in option_xpaths:
+                try:
+                    for opt in self.driver.find_elements(By.XPATH, xp):
+                        if opt.is_displayed():
+                            return opt
+                except Exception:
+                    pass
+            return None
 
-        print(f"[Dropdown] Option '{option_text}' not found after opening {identifier}")
+        option_el = _find_option()
+
+        # Scroll inside options container if not found
+        if not option_el:
+            container_xpaths = [
+                "//*[@role='listbox']",
+                "//*[contains(@class,'select__menu')]",
+                "//*[contains(@class,'dropdown-menu')]",
+                "//*[contains(@class,'options-container')]",
+                "//*[contains(@class,'menu-list')]",
+                "//*[contains(@class,'multiselect__content')]",
+            ]
+            for cxp in container_xpaths:
+                try:
+                    for container in self.driver.find_elements(By.XPATH, cxp):
+                        if not container.is_displayed():
+                            continue
+                        cont_h = self.driver.execute_script(
+                            "return arguments[0].scrollHeight;", container
+                        )
+                        step = max(cont_h // 5, 50)
+                        for pos in range(0, cont_h + step, step):
+                            self.driver.execute_script(
+                                "arguments[0].scrollTop = arguments[1];", container, pos
+                            )
+                            time.sleep(0.2)
+                            option_el = _find_option()
+                            if option_el:
+                                break
+                        if option_el:
+                            break
+                except Exception:
+                    pass
+                if option_el:
+                    break
+
+        # Last resort: re-click and wait longer
+        if not option_el:
+            self.safe_click(trigger)
+            time.sleep(2.0)
+            option_el = _find_option()
+
+        if option_el:
+            self.scroll_to(option_el)
+            self.safe_click(option_el)
+            print(f"[Dropdown] Selected: '{option_text}'")
+            time.sleep(0.5)
+            return True
+
+        print(f"[Dropdown] Option '{option_text}' not found for '{identifier}'")
         return False
-
     # ── rating scale ──────────────────────────────────────────────────────────
 
     def fill_rating(self, identifier: str, value: int) -> bool:
@@ -1221,6 +1348,253 @@ class ElementFinder:
 
         return False
 
+    # ── icon finder ───────────────────────────────────────────────────────────
+
+    def find_icon(self, description: str, context: str = "", state: str = "") -> tuple:
+        """
+        Find any icon, toggle, SVG button, or visual-only element.
+
+        Strategies (in order):
+        1. Class name containing icon-{description} (styled-components pattern)
+        2. aria-label / title / data-icon / tooltip containing description
+        3. <i>, <svg>, <img> near context element
+        4. role=button/img with matching class or aria
+        5. FontAwesome / Material / custom icon class patterns
+        6. Generic class scan for description keyword
+
+        Returns (element, kind) where kind is "toggle" or "icon".
+        Auto-scrolls entire page.
+        """
+        desc_l    = description.lower().strip()
+        ctx_l     = context.lower().strip() if context else ""
+        icon_slug = desc_l.replace(" ", "-")
+        icon_slug2 = desc_l.replace(" ", "_")
+
+        def _score(el):
+            score = 0
+            try:
+                if not el.is_displayed():
+                    return -999
+                classes = (el.get_attribute("class") or "").lower()
+                aria    = (el.get_attribute("aria-label") or "").lower()
+                title   = (el.get_attribute("title") or "").lower()
+                tip     = (el.get_attribute("data-tooltip") or
+                           el.get_attribute("data-tip") or
+                           el.get_attribute("data-original-title") or "").lower()
+                icon_at = (el.get_attribute("data-icon") or "").lower()
+                name_at = (el.get_attribute("name") or "").lower()
+
+                # Exact class match: icon-dashboard
+                if f"icon-{icon_slug}" in classes:     score += 15
+                if f"icon_{icon_slug2}" in classes:    score += 15
+                if f"icon-{icon_slug2}" in classes:    score += 14
+                # Generic class contains description
+                if icon_slug in classes:               score += 10
+                if desc_l in classes:                  score += 10
+                # Aria / title / tooltip
+                if desc_l in aria:                     score += 12
+                if desc_l in title:                    score += 11
+                if desc_l in tip:                      score += 10
+                if desc_l in icon_at:                  score += 10
+                if desc_l in name_at:                  score += 8
+                # Text content
+                txt = (el.text or "").lower()
+                if txt == desc_l:                      score += 8
+                if desc_l in txt and len(txt) < 30:    score += 5
+
+                # Context scoring — prefer elements near the context element
+                if ctx_l:
+                    try:
+                        # Check if a nearby label/text matches context
+                        nearby = self.driver.execute_script("""
+                            var el = arguments[0];
+                            var parent = el.parentElement;
+                            for(var i=0;i<4;i++){
+                                if(!parent) break;
+                                if(parent.innerText && parent.innerText.length < 200)
+                                    return parent.innerText.toLowerCase();
+                                parent = parent.parentElement;
+                            }
+                            return '';
+                        """, el)
+                        if ctx_l in (nearby or ""):
+                            score += 8
+                    except Exception:
+                        pass
+
+                # Viewport bonus
+                rect = self.driver.execute_script(
+                    "var r=arguments[0].getBoundingClientRect();"
+                    "return {top:r.top,left:r.left};", el
+                )
+                vw = self.driver.execute_script("return window.innerWidth;")
+                vh = self.driver.execute_script("return window.innerHeight;")
+                if 0 <= rect["top"] <= vh and 0 <= rect["left"] <= vw:
+                    score += 3
+
+            except Exception:
+                return -999
+            return score
+
+        def _is_toggle(el):
+            """Detect if element is a toggle switch."""
+            try:
+                classes = (el.get_attribute("class") or "").lower()
+                role    = (el.get_attribute("role") or "").lower()
+                type_   = (el.get_attribute("type") or "").lower()
+                return (
+                    role == "switch" or
+                    type_ == "checkbox" or
+                    "toggle" in classes or
+                    "switch" in classes
+                )
+            except Exception:
+                return False
+
+        def _scan():
+            candidates = []
+
+            # 1. icon-{slug} class pattern (styled-components / BEM)
+            for slug in (icon_slug, icon_slug2, desc_l):
+                xpaths = [
+                    f"//*[contains(@class,'icon-{slug}')]",
+                    f"//*[contains(@class,'icon_{slug}')]",
+                    f"//*[contains(@class,'{slug}')]",
+                ]
+                for xp in xpaths:
+                    try:
+                        candidates += self.driver.find_elements(By.XPATH, xp)
+                    except Exception:
+                        pass
+
+            # 2. aria-label / title / data-icon / tooltip
+            for attr in ("aria-label", "title", "data-icon",
+                         "data-tooltip", "data-tip", "data-original-title", "name"):
+                try:
+                    candidates += self.driver.find_elements(
+                        By.XPATH,
+                        f"//*[contains(translate(@{attr},"
+                        f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                        f"'{desc_l}')]"
+                    )
+                except Exception:
+                    pass
+
+            # 3. <i>, <svg>, <button>, <a>, <span> containing the slug in any attribute
+            for tag in ("i", "svg", "button", "a", "span", "div"):
+                try:
+                    candidates += self.driver.find_elements(
+                        By.XPATH,
+                        f"//{tag}[contains(translate(@class,"
+                        f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                        f"'{desc_l}')]"
+                    )
+                except Exception:
+                    pass
+
+            # 4. role=button / role=img with any matching content
+            try:
+                candidates += self.driver.find_elements(
+                    By.XPATH,
+                    f"//*[@role='button' or @role='img' or @role='switch']"
+                    f"[contains(translate(@class,"
+                    f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                    f"'{desc_l}') or "
+                    f"contains(translate(@aria-label,"
+                    f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                    f"'{desc_l}')]"
+                )
+            except Exception:
+                pass
+
+            # 5. Text content match for very short text icons
+            try:
+                candidates += self.driver.find_elements(
+                    By.XPATH,
+                    f"//*[normalize-space(text())='{desc_l}' or "
+                    f"normalize-space(text())='{description}']"
+                )
+            except Exception:
+                pass
+
+            # Deduplicate and score
+            seen = set()
+            best_el, best_score = None, -1
+            for el in candidates:
+                try:
+                    eid = self.driver.execute_script(
+                        "return arguments[0].outerHTML.substring(0,80);", el
+                    )
+                    if eid in seen:
+                        continue
+                    seen.add(eid)
+                    s = _score(el)
+                    if s > best_score:
+                        best_score = s
+                        best_el    = el
+                except Exception:
+                    pass
+
+            return best_el, best_score
+
+        # Try current viewport first
+        best_el, best_score = _scan()
+
+        # Scroll and retry if not confident
+        if not best_el or best_score < 5:
+            self._scroll_page_to(0)
+            for y in self._scroll_positions():
+                self._scroll_page_to(y)
+                el, score = _scan()
+                if el and score > best_score:
+                    best_el    = el
+                    best_score = score
+                if best_score >= 10:
+                    break
+
+        if not best_el:
+            return None, "icon"
+
+        kind = "toggle" if _is_toggle(best_el) else "icon"
+        return best_el, kind
+
+    def interact_icon(self, description: str, context: str = "", state: str = "") -> bool:
+        """
+        Find and interact with an icon/toggle.
+        - Icons: just click
+        - Toggles: check current state, flip if needed (or force ON/OFF)
+        """
+        el, kind = self.find_icon(description, context, state)
+
+        if not el:
+            print(f"[Icon] Could not find: '{description}'"
+                  f"{' near ' + context if context else ''}")
+            return False
+
+        self.scroll_to(el)
+
+        if kind == "toggle" and state.upper() in ("ON", "OFF"):
+            # Check current state
+            try:
+                is_on = (
+                    el.is_selected() or
+                    el.get_attribute("aria-checked") == "true" or
+                    "active" in (el.get_attribute("class") or "").lower() or
+                    "checked" in (el.get_attribute("class") or "").lower()
+                )
+                should_be_on = state.upper() == "ON"
+                if is_on == should_be_on:
+                    print(f"[Icon] Toggle '{description}' already {state}")
+                    return True
+            except Exception:
+                pass
+
+        ok = self.safe_click(el)
+        time.sleep(0.5)
+        print(f"[Icon] {kind.capitalize()} '{description}' clicked"
+              f"{' → ' + state if state else ''}")
+        return ok
+
     # ── internal utils ────────────────────────────────────────────────────────
 
     def _collect_by_xpaths(self, xpaths: list) -> list:
@@ -1319,12 +1693,22 @@ def automate_from_config(config_path) -> tuple:
         }
 
     def make_fail(action, expected, actual, reason):
+        # Safe screenshot — works with both old and new vision.py
+        try:
+            if hasattr(vision, "_capture_screenshot"):
+                shot = vision._capture_screenshot(driver, action)
+            elif hasattr(vision, "_capture_failure_screenshot"):
+                shot = vision._capture_failure_screenshot(driver, action)
+            else:
+                shot = None
+        except Exception:
+            shot = None
         return {
             "action": action, "expected": expected,
             "actual": actual, "result": "FAIL",
             "reason": reason,
             "confidence": 0.0,
-            "screenshot": vision._capture_screenshot(driver, action),
+            "screenshot": shot,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -1492,6 +1876,32 @@ def automate_from_config(config_path) -> tuple:
             except Exception as e:
                 judgment = make_fail("Checkbox", "N/A", "ERROR", str(e))
 
+        # ── ICON / TOGGLE ────────────────────────────────────────────────────
+        elif norm.startswith("icon:"):
+            try:
+                raw  = action.split(":", 1)[1].strip()
+                args = parse_args(raw)
+                description = args[0].strip() if len(args) > 0 else ""
+                context     = args[1].strip() if len(args) > 1 else ""
+                state       = args[2].strip().upper() if len(args) > 2 else ""
+
+                ok = finder.interact_icon(description, context, state)
+                time.sleep(0.5)
+                if ok:
+                    judgment = vision.judge_step(
+                        "icon", description,
+                        f"Clicked{' → ' + state if state else ''}",
+                        driver
+                    )
+                else:
+                    judgment = make_fail(
+                        "Icon", description, "NOT FOUND",
+                        f"Could not find icon '{description}'"
+                        f"{' near ' + context if context else ''} after full scroll."
+                    )
+            except Exception as e:
+                judgment = make_fail("Icon", "N/A", "ERROR", str(e))
+
         # ── RATING ───────────────────────────────────────────────────────────
         elif norm.startswith("rating:"):
             try:
@@ -1561,7 +1971,16 @@ def automate_from_config(config_path) -> tuple:
                 break
 
     # ── Final screenshot + quit ───────────────────────────────────────────────
-    screenshot_path = vision._capture_screenshot(driver, "final")
+    # Safe final screenshot
+    try:
+        if hasattr(vision, "_capture_screenshot"):
+            screenshot_path = vision._capture_screenshot(driver, "final")
+        elif hasattr(vision, "_capture_failure_screenshot"):
+            screenshot_path = vision._capture_failure_screenshot(driver, "final")
+        else:
+            screenshot_path = None
+    except Exception:
+        screenshot_path = None
 
     overall = vision.judge_run(executed_results, total_steps)
     overall["total_steps"] = total_steps
