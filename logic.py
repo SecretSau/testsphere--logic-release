@@ -340,6 +340,177 @@ class ElementFinder:
 
         return best_el
 
+    # ── login field finder ───────────────────────────────────────────────────────
+
+    # Common field name variations for email / username / password fields
+    _EMAIL_VARIANTS = [
+        "email", "e-mail", "e_mail", "email address", "emailaddress",
+        "username", "user name", "user_name", "login", "log in",
+        "signin", "sign in", "account", "id", "user id", "userid",
+    ]
+    _PASSWORD_VARIANTS = [
+        "password", "pass", "passwd", "passcode", "pin",
+        "secret", "credential", "pwd",
+    ]
+
+    def find_login_field(self, identifier: str) -> object | None:
+        """
+        Smart login field finder.
+        Tries the exact identifier first, then falls back to common
+        email/username/password field variations automatically.
+
+        Searches by:
+        - label text (exact + partial + case-insensitive)
+        - placeholder, name, id, aria-label attributes
+        - input type (email, password, text)
+        - autocomplete attribute (email, username, current-password)
+        - Common class names
+        """
+        ident_l = identifier.lower().strip()
+
+        # Build candidate list:
+        # Start with the exact identifier, then add relevant variants
+        if any(v in ident_l for v in ["pass", "pwd", "secret", "pin", "credential"]):
+            candidates = [identifier] + self._PASSWORD_VARIANTS
+            input_types = ["password", "text"]
+            autocomplete_vals = ["current-password", "new-password", "password"]
+        else:
+            candidates = [identifier] + self._EMAIL_VARIANTS
+            input_types = ["email", "text", "tel"]
+            autocomplete_vals = ["email", "username", "login"]
+
+        def _scan_all():
+            # Strategy 1: Try each candidate through find_input
+            for cand in candidates:
+                try:
+                    el = self._find_input_by_label_or_attr(cand)
+                    if el:
+                        return el
+                except Exception:
+                    pass
+
+            # Strategy 2: input[type=email/password]
+            for t in input_types:
+                try:
+                    for el in self.driver.find_elements(
+                        By.XPATH, f"//input[@type='{t}']"
+                    ):
+                        if el.is_displayed():
+                            return el
+                except Exception:
+                    pass
+
+            # Strategy 3: autocomplete attribute
+            for ac in autocomplete_vals:
+                try:
+                    for el in self.driver.find_elements(
+                        By.XPATH, f"//input[@autocomplete='{ac}']"
+                    ):
+                        if el.is_displayed():
+                            return el
+                except Exception:
+                    pass
+
+            # Strategy 4: name/id/placeholder contains any variant
+            for cand in candidates:
+                cand_l = cand.lower()
+                for attr in ("name", "id", "placeholder", "aria-label"):
+                    try:
+                        xp = (
+                            f"//input[contains("
+                            f"translate(@{attr},'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                            f"'abcdefghijklmnopqrstuvwxyz'),'{cand_l}')]"
+                        )
+                        for el in self.driver.find_elements(By.XPATH, xp):
+                            if el.is_displayed():
+                                return el
+                    except Exception:
+                        pass
+
+            return None
+
+        # Try current viewport first
+        el = _scan_all()
+        if el:
+            return el
+
+        # Scroll and retry
+        self._scroll_page_to(0)
+        for y in self._scroll_positions():
+            self._scroll_page_to(y)
+            el = _scan_all()
+            if el:
+                return el
+
+        # Last resort: first visible text/email/password input on page
+        for t in input_types:
+            try:
+                for el in self.driver.find_elements(
+                    By.XPATH, f"//input[@type='{t}']"
+                ):
+                    if el.is_displayed():
+                        return el
+            except Exception:
+                pass
+
+        return None
+
+    def _find_input_by_label_or_attr(self, identifier: str) -> object | None:
+        """
+        Find a single input by label text or common attributes.
+        Case-insensitive, partial match.
+        """
+        ident_l = identifier.lower().strip()
+
+        # 1. Label → associated input
+        try:
+            lbl_xp = (
+                f"//label[contains("
+                f"translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                f"'abcdefghijklmnopqrstuvwxyz'),'{ident_l}')]"
+            )
+            for lbl in self.driver.find_elements(By.XPATH, lbl_xp):
+                if not lbl.is_displayed():
+                    continue
+                for_id = lbl.get_attribute("for")
+                if for_id:
+                    try:
+                        el = self.driver.find_element(By.ID, for_id)
+                        if el.is_displayed():
+                            return el
+                    except Exception:
+                        pass
+                try:
+                    el = lbl.find_element(
+                        By.XPATH,
+                        ".//following::input[1] | .//following::textarea[1]"
+                    )
+                    if el.is_displayed():
+                        return el
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 2. Attributes: placeholder, name, id, aria-label
+        for attr in ("placeholder", "name", "id", "aria-label"):
+            try:
+                xp = (
+                    f"//input[contains("
+                    f"translate(@{attr},'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                    f"'abcdefghijklmnopqrstuvwxyz'),'{ident_l}')] | "
+                    f"//textarea[contains("
+                    f"translate(@{attr},'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                    f"'abcdefghijklmnopqrstuvwxyz'),'{ident_l}')]"
+                )
+                for el in self.driver.find_elements(By.XPATH, xp):
+                    if el.is_displayed():
+                        return el
+            except Exception:
+                pass
+
+        return None
+
     def find_input(self, identifier: str) -> object | None:
         """
         Find an input / textarea matching identifier.
@@ -1732,7 +1903,9 @@ def automate_from_config(config_path) -> tuple:
                     raise ValueError()
                 field, value = args
 
-                inp = finder.find_input(field)
+                # Use smart login field finder — tries identifier + common
+                # email/username/password variations automatically
+                inp = finder.find_login_field(field)
                 if inp:
                     finder.scroll_to(inp)
                     ok = finder.safe_type(inp, value)
@@ -1740,7 +1913,8 @@ def automate_from_config(config_path) -> tuple:
                     judgment = vision.judge_step("login", field, value, driver)
                 else:
                     judgment = make_fail("Login", value, "NOT FOUND",
-                                        f"Could not find login field '{field}'")
+                                        f"Could not find login field '{field}' "
+                                        f"or any common email/username/password field.")
             except Exception as e:
                 judgment = make_fail("Login", "N/A", "ERROR", str(e))
 
