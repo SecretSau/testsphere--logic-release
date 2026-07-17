@@ -29,8 +29,7 @@ logger = logging.getLogger("TestSphere.LogicUpdater")
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 MANIFEST_URL = (
-    "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_PUBLIC_REPO"
-    "/main/manifest.json"
+    "https://raw.githubusercontent.com/SecretSau/testsphere--logic-release/main/manifest.json"
 )
 
 NETWORK_TIMEOUT = 5  # seconds — short so startup is not delayed
