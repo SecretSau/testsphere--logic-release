@@ -514,39 +514,103 @@ class ElementFinder:
     def find_input(self, identifier: str) -> object | None:
         """
         Find an input / textarea matching identifier.
-        Strategies: label → ID/name → aria → placeholder → header → scroll.
+
+        Handles styled-components layouts where:
+        - Labels have NO for= attribute
+        - Inputs have NO name/id/placeholder/aria-label
+        - Label and input are siblings inside the same div
+        - Labels contain child spans (e.g. <label>Account <span>*</span></label>)
+
+        Strategy order:
+        1. Label (direct text only) → for= attribute → linked input
+        2. Label → SAME PARENT CONTAINER → sibling input  ← key fix
+        3. Label → following sibling input
+        4. Label (full text including spans) → parent container search
+        5. ID / name exact match
+        6. aria-label / placeholder / name / id contains
+        7. Nearest container to a heading with matching text
         """
+        ident_l = identifier.lower().strip()
+
         def _scan():
-            # 1. label → associated input
-            try:
-                lbl_xpath = (
-                    f"//label[contains(translate(normalize-space(.),"
-                    f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
-                    f"'{identifier.lower()}')]"
-                )
-                for lbl in self.driver.find_elements(By.XPATH, lbl_xpath):
-                    if not lbl.is_displayed():
-                        continue
-                    for_id = lbl.get_attribute("for")
-                    if for_id:
+            # ── Strategy 1 & 2: Label-based search ───────────────────────────
+            # Use TWO label XPaths:
+            # A. normalize-space(text()) — direct text only, ignores span children
+            #    e.g. <label>Account <span>*</span></label> → "Account"
+            # B. normalize-space(.)     — all text including children
+            #    e.g. <label>Account <span>*</span></label> → "Account *"
+            label_xpaths = [
+                # Direct text only (strips asterisks, icons from spans)
+                f"//label[contains(translate(normalize-space(text()),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                f"'{ident_l}')]",
+                # Full text including children
+                f"//label[contains(translate(normalize-space(.),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                f"'{ident_l}')]",
+                # Also try div/span acting as labels (styled-components pattern)
+                f"//*[contains(@class,'label') and contains(translate(normalize-space(text()),"
+                f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                f"'{ident_l}')]",
+            ]
+
+            for lbl_xpath in label_xpaths:
+                try:
+                    for lbl in self.driver.find_elements(By.XPATH, lbl_xpath):
+                        if not lbl.is_displayed():
+                            continue
+
+                        # 1a. for= attribute → find by ID
+                        for_id = lbl.get_attribute("for")
+                        if for_id:
+                            try:
+                                el = self.driver.find_element(By.ID, for_id)
+                                if el.is_displayed():
+                                    return el
+                            except Exception:
+                                pass
+
+                        # 1b. SAME PARENT CONTAINER → sibling input
+                        # This is the key fix for styled-components layouts:
+                        # <div><label>Account *</label><input .../></div>
+                        sibling_xpaths = [
+                            # Direct sibling (same parent)
+                            "./following-sibling::input",
+                            "./following-sibling::textarea",
+                            # Parent → child input (label and input both children of div)
+                            "./parent::*/input",
+                            "./parent::*/textarea",
+                            # Grandparent search (one level up)
+                            "./parent::*/following-sibling::*/input",
+                            "./parent::*/following-sibling::*/textarea",
+                            # Inside a wrapping div (common styled-components pattern)
+                            "./parent::div//input",
+                            "./parent::div//textarea",
+                        ]
+                        for sxp in sibling_xpaths:
+                            try:
+                                for el in lbl.find_elements(By.XPATH, sxp):
+                                    if el.is_displayed():
+                                        return el
+                            except Exception:
+                                pass
+
+                        # 1c. Following input in document order (broader fallback)
                         try:
-                            el = self.driver.find_element(By.ID, for_id)
-                            if el.is_displayed():
-                                return el
+                            for el in lbl.find_elements(
+                                By.XPATH,
+                                "./following::input[position()<=3] | "
+                                "./following::textarea[position()<=3]"
+                            ):
+                                if el.is_displayed():
+                                    return el
                         except Exception:
                             pass
-                    try:
-                        el = lbl.find_element(
-                            By.XPATH, ".//following::input[1] | .//following::textarea[1]"
-                        )
-                        if el.is_displayed():
-                            return el
-                    except Exception:
-                        pass
-            except Exception:
-                pass
 
-            # 2. ID / name exact
+                except Exception:
+                    pass
+
+            # ── Strategy 2: ID / name exact ───────────────────────────────────
             for strat, val in ((By.ID, identifier), (By.NAME, identifier)):
                 try:
                     el = self.driver.find_element(strat, val)
@@ -555,10 +619,7 @@ class ElementFinder:
                 except Exception:
                     pass
 
-            # 3. aria-label / placeholder (contains)
-            ident_l = identifier.lower()
-            tr = (f"translate(normalize-space(.),"
-                  f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')")
+            # ── Strategy 3: aria-label / placeholder / name / id contains ─────
             for attr in ("aria-label", "placeholder", "name", "id"):
                 try:
                     xpath = (
@@ -575,10 +636,14 @@ class ElementFinder:
                 except Exception:
                     pass
 
-            # 4. Nearby header → form-group input
+            # ── Strategy 4: Container search via heading ───────────────────────
             try:
+                tr = (
+                    f"translate(normalize-space(text()),"
+                    f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')"
+                )
                 hdr_xpath = " | ".join(
-                    f"//h{i}[contains({tr},'{identifier.lower()}')]"
+                    f"//h{i}[contains({tr},'{ident_l}')]"
                     for i in range(1, 7)
                 )
                 for hdr in self.driver.find_elements(By.XPATH, hdr_xpath):
@@ -588,13 +653,77 @@ class ElementFinder:
                             "./ancestor::div[contains(@class,'form') or "
                             "contains(@class,'field') or contains(@class,'group')][1]"
                         )
-                        for inp in fg.find_elements(
-                            By.XPATH, ".//input | .//textarea"
-                        ):
+                        for inp in fg.find_elements(By.XPATH, ".//input | .//textarea"):
                             if inp.is_displayed():
                                 return inp
                     except Exception:
                         pass
+            except Exception:
+                pass
+
+            # ── Strategy 5: Ancestor div containing matching text + input ──────
+            try:
+                container_xpath = (
+                    f"//*[self::div or self::li or self::section or self::fieldset]"
+                    f"[.//*[contains(translate(normalize-space(text()),"
+                    f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                    f"'{ident_l}')]]"
+                    f"[.//input or .//textarea]"
+                )
+                for container in self.driver.find_elements(By.XPATH, container_xpath):
+                    if not container.is_displayed():
+                        continue
+                    inputs = container.find_elements(By.XPATH, ".//input | .//textarea")
+                    visible = [i for i in inputs if i.is_displayed()]
+                    if len(visible) == 1:
+                        return visible[0]
+                    elif visible:
+                        return visible[0]
+            except Exception:
+                pass
+
+            # ── Strategy 6: input-text class outer wrapper ────────────────────
+            # Handles: <div class="sc-xxx input-text"><div><label>X</label><input/></div></div>
+            try:
+                it_xpath = (
+                    f"//*[contains(@class,'input-text')]"
+                    f"[.//*[contains(translate(normalize-space(text()),"
+                    f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                    f"'{ident_l}')]]"
+                )
+                for container in self.driver.find_elements(By.XPATH, it_xpath):
+                    if not container.is_displayed():
+                        continue
+                    inputs = container.find_elements(By.XPATH, ".//input | .//textarea")
+                    visible = [i for i in inputs if i.is_displayed()]
+                    if visible:
+                        return visible[0]
+            except Exception:
+                pass
+
+            # ── Strategy 7: JavaScript DOM traversal ─────────────────────────
+            # Most reliable for styled-components — walks label parent chain to input
+            try:
+                el = self.driver.execute_script("""
+                    var ident = arguments[0].toLowerCase().trim();
+                    var labels = document.querySelectorAll('label, [class*="label"]');
+                    for (var i = 0; i < labels.length; i++) {
+                        var lbl = labels[i];
+                        var txt = lbl.textContent.trim().toLowerCase();
+                        if (txt.indexOf(ident) !== -1) {
+                            var parent = lbl.parentElement;
+                            for (var depth = 0; depth < 4; depth++) {
+                                if (!parent) break;
+                                var inp = parent.querySelector('input, textarea');
+                                if (inp && inp.offsetParent !== null) return inp;
+                                parent = parent.parentElement;
+                            }
+                        }
+                    }
+                    return null;
+                """, identifier)
+                if el:
+                    return el
             except Exception:
                 pass
 

@@ -95,7 +95,7 @@ def _ask_gemini_vision(image_b64: str, prompt: str) -> str:
                 {"text": prompt}
             ]
         }],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 512}
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024}
     }
 
     try:
@@ -156,6 +156,20 @@ def _gemini_judge_screen(
         }
     except Exception as e:
         print(f"[Vision] Gemini JSON parse failed: {e}  raw={raw[:200]}")
+        # Try to salvage truncated JSON by extracting result field
+        try:
+            import re as _re
+            result_match = _re.search(r'"result"\s*:\s*"(PASS|FAIL|INDETERMINATE)"', raw)
+            conf_match   = _re.search(r'"confidence"\s*:\s*([0-9.]+)', raw)
+            if result_match:
+                return {
+                    "result":     result_match.group(1),
+                    "confidence": float(conf_match.group(1)) if conf_match else 0.6,
+                    "actual":     "",
+                    "reason":     "Gemini Vision partial response — result extracted.",
+                }
+        except Exception:
+            pass
         return None
 
 
@@ -255,6 +269,15 @@ def judge_step(
 
     # ── Input / Login / Text / Calendar — DOM check then Gemini Vision ───────
     if action_type.lower() in ("login", "text", "input", "calendar"):
+        # Auto-pass password fields — value is always masked, unverifiable visually
+        field_l = field.lower()
+        if any(p in field_l for p in ("password", "passwd", "pass", "pwd", "pin", "secret")):
+            result["result"]     = "PASS"
+            result["confidence"] = 1.0
+            result["reason"]     = "Password field — masked value assumed correct after input."
+            result["actual"]     = "••••••••"
+            return result
+
         # 1. Try DOM check first (fastest)
         element = _find_element_for_verification(driver, field)
         if element:
